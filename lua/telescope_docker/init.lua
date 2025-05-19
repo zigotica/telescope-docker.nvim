@@ -147,6 +147,65 @@ M.docker_volumes = function(opts)
         :find()
 end
 
+-- List of shells to try, in order of preference
+local SUPPORTED_SHELLS = {
+  { name = "sh",   path = "/bin/sh" },
+  { name = "bash", path = "/bin/bash" },
+  { name = "zsh",  path = "/bin/zsh" },
+}
+
+---Get the best available shell in the container
+---@param image string Docker image name
+---@return string|nil shell_name Name of the shell found or nil if none available
+local function get_shell(image)
+  -- Use a single docker run to check all shells at once
+  local cmd = table.concat({
+    "docker",
+    "run",
+    "--rm",
+    image,
+    -- Use find to check multiple paths at once, more efficient than multiple which commands
+    "find",
+    "/bin/sh",
+    "/bin/bash",
+    "/bin/zsh",
+    "-maxdepth",
+    "0",
+    "-type",
+    "f",
+    "-executable",
+    "2>/dev/null",
+  }, " ")
+
+  local job = plenary.job:new({
+    command = "sh",
+    args = { "-c", cmd },
+    on_stderr = function(_, data)
+      if data then
+        log.warn("Error checking shells:", data)
+      end
+    end,
+  })
+
+  local output = job:sync()
+
+  -- Check available shells in order of preference
+  for _, shell in ipairs(SUPPORTED_SHELLS) do
+    for _, line in ipairs(output) do
+      if line == shell.path then
+        return shell.name
+      end
+    end
+  end
+
+  -- We usually can "attach" into containers (i.e. alpine or ubuntu) because they run a shell or long-running process by default,
+  -- while a typical Next.js container immediately starts a server and doesn't expose a shell, making it non-interactive by design.
+  -- Passing get_shell(image) to the docker command in docker_images actions allows attach to work in most cases.
+  log.warn("No supported shell found in image:", image)
+  return "sh" -- Fallback to sh as last resort
+end
+
+
 M.docker_images = function(opts)
     pickers
         .new(opts, {
@@ -206,6 +265,7 @@ M.docker_images = function(opts)
                         'run',
                         '-it',
                         selection.value.Repository,
+                        get_shell(selection.value.Repository),
                     }
                     log.debug('Running', command)
                     vim.cmd(vim.fn.join(command, ' '))
